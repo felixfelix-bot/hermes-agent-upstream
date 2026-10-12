@@ -67,6 +67,15 @@ Rules — all mandatory:
 - A non-`success` conclusion (exit 1) must be named in the verdict together with why it is unrelated, or the verdict is request-changes / escalate. Never silently approve a red or unknown head.
 - Record the citation in the terminal Kanban transition metadata so the fleet `ci_evidence` gate (D-128) can read it, using the structured form `ci_evidence: workflow=<path> conclusion=<success|failure|timed_out>`. A documented absence is recorded but does **not** satisfy the `code` (code/risky) tier.
 
+## Landing (mandatory — the default branch is the source of truth)
+
+A code deliverable is **not** approved until it is on the board repo's **default branch**; work on an unmerged branch does not count as done ("things haven't happened unless they're on the default branch").
+
+- Confirm the implementer's branch is **merged** to the repo default (or open a PR and, with CI green, land it). A pushed-but-unmerged branch is **not** landed.
+- When you approve, `kanban_complete` parks the card in **`landing`** (config `kanban.land_required`). Once the merge is on the default branch, land it:
+  `hermes kanban land <task-id> --sha <merge-sha> --actor <you>`
+- `land: skip` is only for recon/research/no-code tasks that touch no repo.
+
 ## How to Run
 
 This skill is loaded automatically by the review dispatcher. Start with `kanban_show` before inspecting files or choosing a verdict.

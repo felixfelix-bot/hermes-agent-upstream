@@ -601,6 +601,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                             help='JSON dict of structured facts (e.g. \'{"changed_files": [...], '
                                  '"tests_run": 12}\'). Stored on the closing run.')
 
+    p_land = sub.add_parser(
+        "land",
+        help="Mark a landing task done (its branch is now on the default branch)",
+    )
+    p_land.add_argument("task_id", help="Task id currently in the landing state")
+    p_land.add_argument("--sha", dest="merged_sha", default=None,
+                        help="Merged commit sha (recorded on the landed event)")
+    p_land.add_argument("--actor", default=None, help="Who landed it")
+
     p_edit = sub.add_parser(
         "edit",
         help="Edit recovery fields on an already-completed task",
@@ -1106,6 +1115,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "attachments": _cmd_attachments,
             "attach-rm": _cmd_attach_rm,
             "complete": _cmd_complete,
+            "land":     _cmd_land,
             "edit":     _cmd_edit,
             "block":    _cmd_block,
             "schedule": _cmd_schedule,
@@ -2449,6 +2459,25 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
             f"Requested review for {tid}"
             + (f": {display_summary}" if display_summary else "")
         )
+    return 0
+
+
+def _cmd_land(args: argparse.Namespace) -> int:
+    """``landing`` -> ``done`` once the branch is on the default branch."""
+    tid = getattr(args, "task_id", None)
+    if not tid:
+        print("a task_id is required", file=sys.stderr)
+        return 1
+    with kb.connect_closing() as conn:
+        ok = kb.land_task(
+            conn, tid,
+            merged_sha=getattr(args, "merged_sha", None),
+            actor=getattr(args, "actor", None),
+        )
+    if not ok:
+        print(f"kanban: {tid} is not in the landing state", file=sys.stderr)
+        return 1
+    print(f"landed {tid}")
     return 0
 
 
