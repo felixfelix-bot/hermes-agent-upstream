@@ -132,7 +132,7 @@ def _cross_node_claim_allows(board: Optional[str], task_id: Optional[str]) -> bo
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
+VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "landing", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
@@ -5173,6 +5173,74 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+# ---- landing gate: the default branch is the source of truth ---------------
+# A code card is not "done" until its branch is on the board repo's default
+# branch. When ``kanban.land_required`` is enabled, complete_task parks such a
+# card in ``landing`` instead of ``done``; the lander (review lane) calls
+# :func:`land_task` once the merge is on the default branch. The core does not
+# fetch repos — the flag is the signal, verification is the lander's job.
+
+def _landing_required() -> bool:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        return bool((cfg.get("kanban") or {}).get("land_required", False))
+    except Exception:
+        return False
+
+
+def park_for_landing(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    repo: Optional[str] = None,
+    pr: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> bool:
+    """Move a card to the ``landing`` state (branch not yet on default)."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "landing":
+            return True
+        conn.execute(
+            "UPDATE tasks SET status = 'landing', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+            (task_id,),
+        )
+        _append_event(conn, task_id, "landing_required",
+                      {"repo": repo, "pr": pr,
+                       "reason": reason or "branch not on the default branch"})
+    return True
+
+
+def land_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    merged_sha: Optional[str] = None,
+    actor: Optional[str] = None,
+) -> bool:
+    """``landing`` -> ``done`` once the work is on the default branch."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None or row["status"] != "landing":
+            return False
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? "
+            "WHERE id = ? AND status = 'landing'",
+            (int(time.time()), task_id),
+        )
+        _append_event(conn, task_id, "landed",
+                      {"merged_sha": merged_sha, "actor": actor})
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5183,6 +5251,7 @@ def complete_task(
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True,
+    landed: bool = False,
 ) -> bool:
     """Transition ``running|ready|blocked|review -> done`` and record ``result``.
 
@@ -5248,6 +5317,19 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # Landing gate (default branch = source of truth): a worktree code card is
+    # not done until its branch is on the board repo's default branch. When
+    # ``kanban.land_required`` is enabled, park it in ``landing`` unless the
+    # caller asserts (``landed=True``) that the merge already landed. The lander
+    # (review lane) then calls :func:`land_task` to move landing -> done.
+    if _landing_required() and not landed:
+        _wrow = conn.execute(
+            "SELECT workspace_kind FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if _wrow is not None and (_wrow["workspace_kind"] or "") == "worktree":
+            park_for_landing(conn, task_id)
+            return True
 
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
